@@ -17,9 +17,9 @@
 # mode: 0
 # distribute: True
 # num_parallel_workers: 8
-mode: 0
+mode: 1
 distribute: False
-val_while_train: False
+val_while_train: True
 
 # dataset config
 dataset: 'imagenet'
@@ -46,7 +46,7 @@ pretrained: False
 ckpt_path: ''
 keep_checkpoint_max: 10
 ckpt_save_dir: 'ckpt'
-epoch_size: 1
+epoch_size: 2
 dataset_sink_mode: False
 amp_level: 'O2'
 

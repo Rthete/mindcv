@@ -150,29 +150,46 @@ class MobileVitBlock(nn.Cell):
             Conv2dNormActivation(in_channels, d_model, 1, activation=nn.SiLU)
         )
 
-        self.transformer = Transformer(d_model, layers, 1, 32, mlp_dim, 0.1)
+        self.transformer = Transformer(d_model, layers, 4, 8, mlp_dim, 0.1)
+        # self.transformer = Transformer(d_model, layers, 1, 32, mlp_dim, 0.1)
 
         # Fusion block
         self.fusion_block1 = nn.Conv2d(d_model, in_channels, kernel_size = 1)
         self.fusion_block2 = nn.Conv2d(in_channels * 2, out_channels, 3, pad_mode = "pad", padding = 1)
+
 
     def construct(self, x):
         #TODO: rearrange处理
         
         local_repr = self.local_representation(x)
         # global_repr = self.global_representation(local_repr)
-        _, _, h, w = local_repr.shape
+
+        b, d, h, w = local_repr.shape
+
+        # print("1", local_repr.shape)
         # local_repr = local_repr.asnumpy()
         # global_repr = rearrange(local_repr, 'b d (h ph) (w pw) -> b (ph pw) (h w) d', ph=2, pw=2)
         # global_repr = Tensor(global_repr)
+        # print("2", global_repr.shape)
         # global_repr = self.transformer(global_repr)
+        # print("!!", global_repr.shape)
         # global_repr = global_repr.asnumpy()
         # global_repr = rearrange(global_repr, 'b (ph pw) (h w) d -> b d (h ph) (w pw)', h=h//2, w=w//2, ph=2, pw=2)
         # global_repr = Tensor(global_repr)
+        # print("3", global_repr.shape)
+
+        # replace einops
+        # 1
+        ph, pw = 2, 2
+        nh, nw = h // ph, w // pw
+        global_repr = ops.reshape(local_repr, (b, ph * pw, nh * nw, d))
+        global_repr = self.transformer(global_repr)
+        global_repr = ops.reshape(global_repr, (b, d, nh * ph, nw * pw))
+
 
         # Fuse the local and gloval features in the concatenation tensor
-        # fuse_repr = self.fusion_block1(global_repr)
-        fuse_repr = self.fusion_block1(local_repr)
+        fuse_repr = self.fusion_block1(global_repr)
+        # fuse_repr = self.fusion_block1(local_repr)
         concat = ops.Concat(axis=1)
         result = self.fusion_block2(concat((x, fuse_repr)))
         return result

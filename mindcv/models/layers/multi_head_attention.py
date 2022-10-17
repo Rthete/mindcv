@@ -34,20 +34,26 @@ class MultiHeadSelfAttention(nn.Cell):
         self.w_out = nn.Dense(_weight_dim, dim, has_bias=False)
 
     def construct(self, x):
-        split = ops.Split(-1, 3)
-        qkv = split(self.to_qvk(x))
+        qkv = ops.split(self.to_qvk(x), -1, 3)
+        b, p, n, c = qkv[0].shape
 
-        q, k, v = map(lambda t: rearrange(t.asnumpy(), 'b p n (h d) -> b p h n d', h=self.num_heads), qkv)
-        q = Tensor(q)
-        k = Tensor(k)
-        v = Tensor(v)
+        # print(self.num_heads)
+        # q, k, v = map(lambda t: rearrange(t.asnumpy(), 'b p n (h d) -> b p h n d', h=self.num_heads), qkv)
+        # q = Tensor(q)
+        # k = Tensor(k)
+        # v = Tensor(v)
+        
+        q, k, v = map(lambda t: ops.reshape(t, (b, p, self.num_heads, n, c // self.num_heads)), qkv)
 
         k = np.swapaxes(k, -1, -2)
         dots = ops.matmul(q, k) * self.scale_factor
         softmax = nn.Softmax()
         attn = softmax(dots)
         out = ops.matmul(attn, v)
-        # tensor类型转换为numpy
-        out = rearrange(out.asnumpy(), 'b p h n d -> b p n (h d)')
-        out = Tensor(out)
+
+        # print(out.shape)
+        # out = rearrange(out.asnumpy(), 'b p h n d -> b p n (h d)')
+        # out = Tensor(out)
+        
+        out = ops.reshape(out, (b, p, n, c))
         return self.w_out(out)
