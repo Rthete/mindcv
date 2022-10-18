@@ -1,10 +1,7 @@
-import imp
 from mindspore import Tensor
 from mindspore import nn
 import mindspore.numpy as np
 import mindspore.ops as ops
-# from .layers.rearrange import rearrange
-from einops import rearrange
 
 class MultiHeadSelfAttention(nn.Cell):
     """
@@ -37,13 +34,17 @@ class MultiHeadSelfAttention(nn.Cell):
         qkv = ops.split(self.to_qvk(x), -1, 3)
         b, p, n, c = qkv[0].shape
 
-        # print(self.num_heads)
+        # NOTE: remove einops
         # q, k, v = map(lambda t: rearrange(t.asnumpy(), 'b p n (h d) -> b p h n d', h=self.num_heads), qkv)
         # q = Tensor(q)
         # k = Tensor(k)
         # v = Tensor(v)
         
-        q, k, v = map(lambda t: ops.reshape(t, (b, p, self.num_heads, n, c // self.num_heads)), qkv)
+        # can't use map in GRAPH_MODE
+        # q, k, v = map(lambda t: ops.reshape(t, (b, p, self.num_heads, n, c // self.num_heads)), qkv)
+        q = ops.reshape(qkv[0], (b, p, self.num_heads, n, c // self.num_heads))
+        k = ops.reshape(qkv[1], (b, p, self.num_heads, n, c // self.num_heads))
+        v = ops.reshape(qkv[2], (b, p, self.num_heads, n, c // self.num_heads))
 
         k = np.swapaxes(k, -1, -2)
         dots = ops.matmul(q, k) * self.scale_factor
@@ -51,7 +52,7 @@ class MultiHeadSelfAttention(nn.Cell):
         attn = softmax(dots)
         out = ops.matmul(attn, v)
 
-        # print(out.shape)
+        # NOTE: remove einops
         # out = rearrange(out.asnumpy(), 'b p h n d -> b p n (h d)')
         # out = Tensor(out)
         
