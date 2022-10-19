@@ -17,13 +17,13 @@
 # mode: 0
 # distribute: True
 # num_parallel_workers: 8
-mode: 0
+mode: 1
 distribute: False
-val_while_train: False
+val_while_train: True
 
 # dataset config
 dataset: 'imagenet'
-data_dir: '../datasets/imagenet-mini'
+data_dir: 'datasets/imagenet-mini'
 shuffle: True
 dataset_download: False
 batch_size: 32
@@ -45,13 +45,14 @@ num_classes: 10
 pretrained: False
 ckpt_path: ''
 keep_checkpoint_max: 10
-ckpt_save_dir: ''
-epoch_size: 1
+ckpt_save_dir: 'ckpt'
+epoch_size: 2
 dataset_sink_mode: False
 amp_level: 'O2'
 
 # loss config
-loss: 'cross_entropy'
+# loss: 'cross_entropy'
+loss: 'ce'
 label_smoothing: 0.1
 
 # lr scheduler config

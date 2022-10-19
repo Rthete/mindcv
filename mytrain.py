@@ -17,7 +17,9 @@ from config import parse_args
 
 ms.set_seed(1)
 
-# python mindcv/mytrain.py -c configs/mobilevit/mobilevit_xxs.yaml 
+# python mindcv/mytrain.py -c mindcv/configs/mobilevit/mobilevit_xxs.yaml
+# python mytrain.py -c configs/mobilevit/mobilevit_xxs.yaml
+
 
 def train(args):
     ''' main train function'''
@@ -197,26 +199,3 @@ def train(args):
 if __name__ == '__main__':
     args = parse_args()
     train(args)
-
-# # 数据集路径
-# imagenet_mini_dir = './datasets/imagenet-mini' # 你的数据存放路径
-# num_classes = 10 # 类别数
-# num_workers = 8 # 数据读取及加载的工作线程数 
-# download = not os.path.exists(imagenet_mini_dir)
-
-# # 创建数据集
-# dataset_train = create_dataset(name='imagenet_mini', root=imagenet_mini_dir, split='train', shuffle=True, num_parallel_workers=num_workers, download=download)
-
-# # 创建所需的数据增强操作的列表
-# trans = create_transforms(dataset_name='imagenet_mini', image_resize=224)
-
-# # 执行数据增强操作，生成所需数据集。
-# loader_train = create_loader(dataset=dataset_train,
-#                              batch_size=64,
-#                              is_training=True,
-#                              num_classes=num_classes,
-#                              transform=trans,
-#                              num_parallel_workers=num_workers)
-
-# num_batches = loader_train.get_dataset_size()
-

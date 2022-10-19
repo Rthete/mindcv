@@ -1,15 +1,17 @@
-if __name__ == '__main__':
-    import numpy as np
-    import mindspore
-    from mindspore import Tensor
-    from mindcv.models.mobilevit import mobilevit_xxs
-    from mindcv.models.densenet import densenet121
+import numpy as np
+import mindspore
+from mindspore import Tensor
+from mindcv.models.mobilevit import mobilevit_xxs
 
-    mindspore.set_context(mode=mindspore.PYNATIVE_MODE)
+mindspore.set_context(mode=mindspore.PYNATIVE_MODE)
+# mindspore.set_context(mode=mindspore.GRAPH_MODE)
+# @mindspore.ms_function
+def test():
     model = mobilevit_xxs()
-    # model = densenet121()
-    print(model)
+    print(model) # can only print in PYNATIVE_MODE
     dummy_input = Tensor(np.random.rand(1, 3, 256, 256), dtype=mindspore.float32)
     y = model(dummy_input)
-    print(y.shape)
-    
+    return y
+
+if __name__ == '__main__':
+    print(test().shape)
