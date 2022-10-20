@@ -19,11 +19,12 @@ ms.set_seed(1)
 
 # python mindcv/mytrain.py -c mindcv/configs/mobilevit/mobilevit_xxs.yaml
 # python mytrain.py -c configs/mobilevit/mobilevit_xxs.yaml
+# conda activate /home/chenjing/.conda/envs/PAMTRI
 
 
 def train(args):
     ''' main train function'''
-    ms.set_context(mode=args.mode)
+    ms.set_context(mode=args.mode, device_id=1)
 
     if args.distribute:
         init()

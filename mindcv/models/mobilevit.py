@@ -299,7 +299,7 @@ def mobilevit_xs(pretrained: bool = False, num_classes: int = 1000, in_channels=
     default_cfg = default_cfgs['mobilevit_xs']
     cfg_xs = model_cfg["xs"]
     model = MobileViT(img_size=256, 
-                      features_liset=cfg_xs["features"], 
+                      features_list=cfg_xs["features"], 
                       d_list=cfg_xs["d"], 
                       transformer_depth=cfg_xs["layers"], 
                       expansion=cfg_xs["expansion_ratio"],
@@ -315,7 +315,7 @@ def mobilevit_s(pretrained: bool = False, num_classes: int = 1000, in_channels=3
     default_cfg = default_cfgs['mobilevit_s']
     cfg_s = model_cfg["s"]
     model = MobileViT(img_size=256, 
-                      features_liset=cfg_s["features"], 
+                      features_list=cfg_s["features"], 
                       d_list=cfg_s["d"], 
                       transformer_depth=cfg_s["layers"], 
                       expansion=cfg_s["expansion_ratio"],
