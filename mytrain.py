@@ -18,7 +18,7 @@ from config import parse_args
 ms.set_seed(1)
 
 # python mindcv/mytrain.py -c mindcv/configs/mobilevit/mobilevit_xxs.yaml
-# python mytrain.py -c configs/mobilevit/mobilevit_xxs.yaml
+# python mindcv/validate.py -c mindcv/configs/mobilevit/mobilevit_xxs.yaml
 # conda activate /home/chenjing/.conda/envs/PAMTRI
 
 

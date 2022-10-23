@@ -16,7 +16,7 @@ import mindspore.ops as ops
 import mindspore.numpy as np
 from mindspore import Tensor
 from mindspore import nn
-
+import mindspore.common.initializer as init
 
 from .layers.conv_norm_act import Conv2dNormActivation
 from .layers.multi_head_attention import MultiHeadSelfAttention
@@ -33,7 +33,7 @@ __all__ = [
 def _cfg(url='', **kwargs):
     return {
         'url': url,
-        'num_classes': 1000,
+        'num_classes': 100,
         'first_conv': '', 'classifier': '',
         **kwargs
     }
@@ -149,8 +149,8 @@ class MobileVitBlock(nn.Cell):
             Conv2dNormActivation(in_channels, d_model, 1, activation=nn.SiLU)
         )
 
-        # self.transformer = Transformer(d_model, layers, 4, 8, mlp_dim, 0.1)
-        self.transformer = Transformer(d_model, layers, 1, 32, mlp_dim, 0.1)
+        self.transformer = Transformer(d_model, layers, 4, 8, mlp_dim, 0.1)
+        # self.transformer = Transformer(d_model, layers, 1, 32, mlp_dim, 0.1)
 
         # Fusion block
         self.fusion_block1 = nn.Conv2d(d_model, in_channels, kernel_size = 1)
@@ -205,7 +205,7 @@ class MobileViT(nn.Cell):
                  d_list, 
                  transformer_depth, 
                  expansion, 
-                 num_classes = 1000):
+                 num_classes = 100):
         super(MobileViT, self).__init__()
 
         self.stem = nn.SequentialCell(
@@ -240,7 +240,18 @@ class MobileViT(nn.Cell):
 
         self.avgpool = nn.AvgPool2d(kernel_size = img_size // 32)
         self.fc = nn.Dense(features_list[10], num_classes)
+        self._initialize_weights()
 
+    def _initialize_weights(self) -> None:
+        """Initialize weights for cells."""
+        for _, cell in self.cells_and_names():
+            if isinstance(cell, nn.Dense):
+                cell.weight.set_data(init.initializer(init.TruncatedNormal(sigma=.02), cell.weight.data.shape))
+                if cell.bias is not None:
+                    cell.bias.set_data(init.initializer(init.Constant(0), cell.bias.shape))
+            elif isinstance(cell, nn.LayerNorm):
+                cell.gamma.set_data(init.initializer(init.Constant(1), cell.gamma.shape))
+                cell.beta.set_data(init.initializer(init.Constant(0), cell.beta.shape))
 
     def construct(self, x):
         # Stem
@@ -279,7 +290,7 @@ model_cfg = {
 } 
         
 @register_model
-def mobilevit_xxs(pretrained: bool = False, num_classes: int = 1000, in_channels=3, **kwargs) -> MobileViT:
+def mobilevit_xxs(pretrained: bool = False, num_classes: int = 100, in_channels=3, **kwargs) -> MobileViT:
     default_cfg = default_cfgs['mobilevit_xxs']
     cfg_xxs = model_cfg["xxs"]
     model = MobileViT(img_size=256, 
@@ -295,7 +306,7 @@ def mobilevit_xxs(pretrained: bool = False, num_classes: int = 1000, in_channels
     return model
 
 @register_model
-def mobilevit_xs(pretrained: bool = False, num_classes: int = 1000, in_channels=3, **kwargs) -> MobileViT:
+def mobilevit_xs(pretrained: bool = False, num_classes: int = 100, in_channels=3, **kwargs) -> MobileViT:
     default_cfg = default_cfgs['mobilevit_xs']
     cfg_xs = model_cfg["xs"]
     model = MobileViT(img_size=256, 
@@ -311,7 +322,7 @@ def mobilevit_xs(pretrained: bool = False, num_classes: int = 1000, in_channels=
     return model
 
 @register_model
-def mobilevit_s(pretrained: bool = False, num_classes: int = 1000, in_channels=3, **kwargs) -> MobileViT:
+def mobilevit_s(pretrained: bool = False, num_classes: int = 100, in_channels=3, **kwargs) -> MobileViT:
     default_cfg = default_cfgs['mobilevit_s']
     cfg_s = model_cfg["s"]
     model = MobileViT(img_size=256, 

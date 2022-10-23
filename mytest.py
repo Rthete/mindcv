@@ -4,7 +4,7 @@ from mindspore import Tensor
 from mindcv.models.mobilevit import mobilevit_xxs
 
 mindspore.set_context(mode=mindspore.PYNATIVE_MODE)
-mindspore.set_context(device_target="GPU", device_id=0)
+mindspore.set_context(device_target="GPU", device_id=1)
 # mindspore.set_context(mode=mindspore.GRAPH_MODE)
 # @mindspore.ms_function
 def test():
