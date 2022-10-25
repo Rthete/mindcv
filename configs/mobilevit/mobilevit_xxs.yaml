@@ -14,17 +14,14 @@
 # ============================================================================
 
 # system config
-# mode: 0
-# distribute: False
-# num_parallel_workers: 1
 mode: 1
 distribute: False
 val_while_train: True
 
 # dataset config
-dataset: 'imagenet'
-# data_dir: 'imagenet/'
-data_dir: '/home/zxy/mobilevit/myrepo/my-mini-imagenet'
+# dataset: 'imagenet'
+data_dir: '/dataset/imagenet/'
+
 shuffle: True
 dataset_download: False
 batch_size: 128
@@ -33,7 +30,6 @@ drop_remainder: True
 # Augmentation config
 image_resize: 256
 scale: [0.08, 1.0]
-# ratio: [0.5, 2.0]
 ratio: [0.75, 1.333]
 hflip: 0.5
 interpolation: 'bilinear'
@@ -42,38 +38,30 @@ color_jitter: [0.4, 0.4, 0.4]
 re_prob: 0.5
 
 # model config
-# model: 'mobilevit_s'
 model: 'mobile_vit_small'
-num_classes: 100
-# num_classes: 1000
+num_classes: 1000
 pretrained: False
 ckpt_path: ''
-# ckpt_path: 'ckpt/mobile_vit_xx_small_best.ckpt'
-# ckpt_path: 'ckpt/mobilevit_xxs_best.ckpt'
 keep_checkpoint_max: 10
-ckpt_save_dir: 'ckpt'
-epoch_size: 150
-dataset_sink_mode: False
+ckpt_save_dir: '/model/'
+epoch_size: 300
+dataset_sink_mode: True
 amp_level: 'O2'
 
 # loss config
-# loss: 'cross_entropy'
 loss: 'ce'
 label_smoothing: 0.1
 
 # lr scheduler config
 scheduler: 'warmup_cosine_decay'
 min_lr: 0.00002
-# lr: 0.0005
 lr: 0.0005
 warmup_epochs: 5
-decay_epochs: 50
-decay_rate: 0.1
+decay_epochs: 295
 
 # optimizer config
 opt: 'adamw'
 filter_bias_and_bn: True
 momentum: 0.9
 weight_decay: 0.05
-loss_scale: 1024
 use_nesterov: False

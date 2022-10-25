@@ -10,7 +10,7 @@ def create_parser():
     # The first arg parser parses out only the --config argument, this argument is used to
     # load a yaml file containing key-values that override the defaults for the main parser below
     parser_config = argparse.ArgumentParser(description='Training Config', add_help=False)
-    parser_config.add_argument('-c', '--config', type=str, default='',
+    parser_config.add_argument('-c', '--config', type=str, default='/code/configs/mobilevit/mobilevit_xxs.yaml',
                                help='YAML config file specifying default arguments (default='')')
 
     # The main parser. It inherits the --config argument for better help information.
