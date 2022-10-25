@@ -27,7 +27,7 @@ dataset: 'imagenet'
 data_dir: '/home/zxy/mobilevit/myrepo/my-mini-imagenet'
 shuffle: True
 dataset_download: False
-batch_size: 128
+batch_size: 64
 drop_remainder: True
 
 # Augmentation config
@@ -43,12 +43,12 @@ re_prob: 0.5
 
 # model config
 # model: 'mobilevit_s'
-model: 'mobile_vit_small'
+model: 'mobile_vit_xx_small'
 num_classes: 100
 # num_classes: 1000
 pretrained: False
-ckpt_path: ''
-# ckpt_path: 'ckpt/mobile_vit_xx_small_best.ckpt'
+# ckpt_path: ''
+ckpt_path: 'ckpt/mobile_vit_xx_small_best.ckpt'
 # ckpt_path: 'ckpt/mobilevit_xxs_best.ckpt'
 keep_checkpoint_max: 10
 ckpt_save_dir: 'ckpt'

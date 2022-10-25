@@ -1,247 +1,577 @@
-"""
-MindSpore implementation of `MobileViT`.
-Refer to: MobileViT：Light-weight, General-purpose, and Mobile-friendly Vision Transformer
-"""
-
-"""
-module importing
-"""
-from threading import local
-from typing import Callable, Optional, List
-import numpy
-
-import mindspore
-import mindspore.nn as nn
-import mindspore.ops as ops
-import mindspore.numpy as np
-from mindspore import Tensor
-from mindspore import nn
+from typing import Optional, Tuple, Union, Dict
+import math
+from .transformer import TransformerEncoder
+from .model_config import get_config
+from .registry import register_model
 import mindspore.common.initializer as init
 
-from .layers.conv_norm_act import Conv2dNormActivation
-from .layers.multi_head_attention import MultiHeadSelfAttention
-from .registry import register_model
+import mindspore
+from mindspore import nn
+from mindspore import ops
+from mindspore import Tensor
 
 
 
-__all__ = [
-    "mobilevit_xxs",
-    "mobilevit_xs",
-    "mobilevit_s",
-]
+def make_divisible(
+    v: Union[float, int],
+    divisor: Optional[int] = 8,
+    min_value: Optional[Union[float, int]] = None,
+) -> Union[float, int]:
+    """
+    This function is taken from the original tf repo.
+    It ensures that all layers have a channel number that is divisible by 8
+    It can be seen here:
+    https://github.com/tensorflow/models/blob/master/research/slim/nets/mobilenet/mobilenet.py
+    :param v:
+    :param divisor:
+    :param min_value:
+    :return:
+    """
+    if min_value is None:
+        min_value = divisor
+    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+    # Make sure that round down does not go down by more than 10%.
+    if new_v < 0.9 * v:
+        new_v += divisor
+    return new_v
 
-def _cfg(url='', **kwargs):
-    return {
-        'url': url,
-        'num_classes': 100,
-        'first_conv': '', 'classifier': '',
-        **kwargs
-    }
-    
-default_cfgs = {
-    'mobilevit_xxs': _cfg(url=''),
-    'mobilevit_xs': _cfg(url=''),
-    'mobilevit_s': _cfg(url=''),  
-}
-
-    
-class PreNorm(nn.Cell):
-    
-    def __init__(self, dim, fn):
-        super().__init__()
-        self.norm = nn.LayerNorm((dim,))
-        self.fn = fn
-
-    def construct(self, x, **kwargs):
-        return self.fn(self.norm(x), **kwargs)
-
-    
-class FFN(nn.Cell):
-    
-    def __init__(self, dim, hidden_dim, dropout=0.):
-        super().__init__()
-        self.net = nn.SequentialCell(
-            nn.Dense(dim, hidden_dim),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Dense(hidden_dim, dim),
-            nn.Dropout(dropout)
-        )
-
-    def construct(self, x):
-        return self.net(x)
-
-
-class Transformer(nn.Cell):
-    
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.1):
-        super().__init__()
-        self.layers = nn.CellList([])
-        for _ in range(depth):
-            self.layers.append(nn.CellList([
-                PreNorm(dim, MultiHeadSelfAttention(dim, heads, dim_head)),
-                PreNorm(dim, FFN(dim, mlp_dim, dropout))
-            ]))
-
-    def construct(self, x):
-        for attn, ff in self.layers:
-            x = attn(x) + x
-            x = ff(x) + x
-        return x
-
-
-class InvertedResidual(nn.Cell):
-    
+class ConvLayer(nn.Cell):
+    """ Conv2d + BN + Act"""
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
-                 stride: int,
-                 expand_ratio: int,
-                 norm: Optional[nn.Cell] = None,
-                 ) -> None:
-        super(InvertedResidual, self).__init__()
-        assert stride in [1, 2]
+                 kernel_size: int = 3,
+                 stride: int = 1,
+                 pad_mode: str = "pad",
+                 padding: Optional[int] = None,
+                 dilation: int = 1,
+                 groups: int = 1,
+                 norm: Optional[nn.Cell] = nn.BatchNorm2d,
+                 activation: Optional[nn.Cell] = nn.SiLU,
+                 has_bias: Optional[bool] = None) -> None:
+        super().__init__()
 
-        if not norm:
-            norm = nn.BatchNorm2d
+        if pad_mode == "pad":
+            if padding is None:
+                padding = ((stride - 1) + dilation * (kernel_size - 1)) // 2
+        else:
+            padding = 0
 
-        hidden_dim = round(in_channels * expand_ratio)
-        self.use_res_connect = stride == 1 and in_channels == out_channels
+        if has_bias is None:
+            has_bias = norm is None
 
-        layers: List[nn.Cell] = []
-        if expand_ratio != 1:
-            # pw
-            layers.append(
-                Conv2dNormActivation(in_channels, hidden_dim, kernel_size=1, norm=norm, activation=None)
-            )
-        layers.extend([
-            # dw
-            Conv2dNormActivation(
-                hidden_dim,
-                hidden_dim,
-                stride=stride,
-                groups=hidden_dim,
-                norm=norm,
-                activation=nn.SiLU
-            ),
-            # pw-linear
-            nn.Conv2d(hidden_dim, out_channels, kernel_size=1,
-                      stride=1, has_bias=False),
-            norm(out_channels)
-        ])
-        self.conv = nn.SequentialCell(layers)
+        layers = [
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride,
+                pad_mode=pad_mode,
+                padding=padding,
+                dilation=dilation,
+                group=groups,
+                has_bias=has_bias)
+        ]
 
-    def construct(self, x: Tensor) -> Tensor:
-        identity = x
-        x = self.conv(x)
-        if self.use_res_connect:
-            x = ops.add(identity, x)
-        return x
+        if norm:
+            layers.append(norm(out_channels))
+        if activation:
+            layers.append(activation())
 
-
-class MobileVitBlock(nn.Cell):
-    
-    def __init__(self, in_channels, out_channels, d_model, layers, mlp_dim):
-        super(MobileVitBlock, self).__init__()
-        # Local representation
-        self.local_representation = nn.SequentialCell(
-            Conv2dNormActivation(in_channels, in_channels, 3, activation=nn.SiLU),
-            Conv2dNormActivation(in_channels, d_model, 1, activation=nn.SiLU)
-        )
-
-        self.transformer = Transformer(d_model, layers, 4, 8, mlp_dim, 0.1)
-        # self.transformer = Transformer(d_model, layers, 1, 32, mlp_dim, 0.1)
-
-        # Fusion block
-        self.fusion_block1 = nn.Conv2d(d_model, in_channels, kernel_size = 1)
-        self.fusion_block2 = nn.Conv2d(in_channels * 2, out_channels, 3, pad_mode = "pad", padding = 1)
-
+        self.features = nn.SequentialCell(layers)
 
     def construct(self, x):
+        
+        output = self.features(x)
+        # # print("conv", output.shape)
+        return output
 
-        local_repr = self.local_representation(x)
-        b, d, h, w = local_repr.shape
+class ConvLayer1(nn.Cell):
+    """
+    Applies a 2D convolution over an input
 
-        # NOTE: remove einops
-        # local_repr = local_repr.asnumpy()
-        # global_repr = rearrange(local_repr, 'b d (h ph) (w pw) -> b (ph pw) (h w) d', ph=2, pw=2)
-        # global_repr = Tensor(global_repr)
-        # global_repr = self.transformer(global_repr)
-        # global_repr = global_repr.asnumpy()
-        # global_repr = rearrange(global_repr, 'b (ph pw) (h w) d -> b d (h ph) (w pw)', h=h//2, w=w//2, ph=2, pw=2)
-        # global_repr = Tensor(global_repr)
+    Args:
+        in_channels (int): :math:`C_{in}` from an expected input of size :math:`(N, C_{in}, H_{in}, W_{in})`
+        out_channels (int): :math:`C_{out}` from an expected output of size :math:`(N, C_{out}, H_{out}, W_{out})`
+        kernel_size (Union[int, Tuple[int, int]]): Kernel size for convolution.
+        stride (Union[int, Tuple[int, int]]): Stride for convolution. Default: 1
+        groups (Optional[int]): Number of groups in convolution. Default: 1
+        bias (Optional[bool]): Use bias. Default: ``False``
+        use_norm (Optional[bool]): Use normalization layer after convolution. Default: ``True``
+        use_act (Optional[bool]): Use activation layer after convolution (or convolution and normalization).
+                                Default: ``True``
 
-        ph, pw = 2, 2
-        nh, nw = h // ph, w // pw
-        global_repr = ops.reshape(local_repr, (b, ph * pw, nh * nw, d))
-        global_repr = self.transformer(global_repr)
-        global_repr = ops.reshape(global_repr, (b, d, nh * ph, nw * pw))
+    Shape:
+        - Input: :math:`(N, C_{in}, H_{in}, W_{in})`
+        - Output: :math:`(N, C_{out}, H_{out}, W_{out})`
+
+    .. note::
+        For depth-wise convolution, `groups=C_{in}=C_{out}`.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, int]],
+        stride: Optional[Union[int, Tuple[int, int]]] = 1,
+        groups: Optional[int] = 1,
+        bias: Optional[bool] = False,
+        use_norm: Optional[bool] = True,
+        use_act: Optional[bool] = True,
+    ) -> None:
+        super().__init__()
+
+        if isinstance(kernel_size, int):
+            kernel_size = (kernel_size, kernel_size)
+
+        if isinstance(stride, int):
+            stride = (stride, stride)
+
+        assert isinstance(kernel_size, Tuple)
+        assert isinstance(stride, Tuple)
+
+        padding = (
+            int((kernel_size[0] - 1) / 2),
+            int((kernel_size[0] - 1) / 2),
+            int((kernel_size[1] - 1) / 2),
+            int((kernel_size[1] - 1) / 2),
+        )
+
+        block = []
+
+        conv_layer = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            pad_mode="pad",
+            padding=padding,
+            group=groups,
+            has_bias=bias
+        )
+
+        block.append(conv_layer)
+
+        if use_norm:
+            norm_layer = nn.BatchNorm2d(num_features=out_channels)
+            block.append(norm_layer)
+
+        if use_act:
+            act_layer = nn.SiLU()
+            block.append(act_layer)
+
+        self.block = nn.SequentialCell(block)
+
+    def construct(self, x: Tensor) -> Tensor:
+        return self.block(x)
 
 
-        # Fuse the local and gloval features in the concatenation tensor
-        fuse_repr = self.fusion_block1(global_repr)
-        concat = ops.Concat(axis=1)
-        result = self.fusion_block2(concat((x, fuse_repr)))
-        return result
+class InvertedResidual(nn.Cell):
+    """
+    This class implements the inverted residual block, as described in `MobileNetv2 <https://arxiv.org/abs/1801.04381>`_ paper
 
-   
+    Args:
+        in_channels (int): :math:`C_{in}` from an expected input of size :math:`(N, C_{in}, H_{in}, W_{in})`
+        out_channels (int): :math:`C_{out}` from an expected output of size :math:`(N, C_{out}, H_{out}, W_{out)`
+        stride (int): Use convolutions with a stride. Default: 1
+        expand_ratio (Union[int, float]): Expand the input channels by this factor in depth-wise conv
+        skip_connection (Optional[bool]): Use skip-connection. Default: True
+
+    Shape:
+        - Input: :math:`(N, C_{in}, H_{in}, W_{in})`
+        - Output: :math:`(N, C_{out}, H_{out}, W_{out})`
+
+    .. note::
+        If `in_channels =! out_channels` and `stride > 1`, we set `skip_connection=False`
+
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        stride: int,
+        expand_ratio: Union[int, float],
+        skip_connection: Optional[bool] = True,
+    ) -> None:
+        assert stride in [1, 2]
+        hidden_dim = make_divisible(int(round(in_channels * expand_ratio)), 8)
+
+        super().__init__()
+
+        block = []
+        if expand_ratio != 1:
+            block.append(
+                ConvLayer(
+                    in_channels=in_channels,
+                    out_channels=hidden_dim,
+                    kernel_size=1,
+                    norm=nn.BatchNorm2d,
+                    activation=nn.SiLU
+                ),
+            )
+
+        block.append(
+            ConvLayer(
+                in_channels=hidden_dim,
+                out_channels=hidden_dim,
+                kernel_size=3,
+                stride=stride,
+                groups=hidden_dim,
+                norm=nn.BatchNorm2d,
+                activation=nn.SiLU
+            ),
+        )
+
+        block.append(
+           ConvLayer(
+                in_channels=hidden_dim,
+                out_channels=out_channels,
+                kernel_size=1,
+                has_bias=False,
+                activation=None
+            ),
+        )
+
+        self.block = nn.SequentialCell(block)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.exp = expand_ratio
+        self.stride = stride
+        self.use_res_connect = (
+            self.stride == 1 and in_channels == out_channels and skip_connection
+        )
+
+    def construct(self, x: Tensor, *args, **kwargs) -> Tensor:
+        # print("bfinv", x.shape)
+        if self.use_res_connect:
+            # print("inv1", self.block(x).shape)
+            return x + self.block(x)
+           
+        else:
+            # print("inv2", self.block(x).shape)
+            return self.block(x)
+
+
+class MobileViTBlock(nn.Cell):
+    """
+    This class defines the `MobileViT block <https://arxiv.org/abs/2110.02178?context=cs.LG>`_
+
+    Args:
+        opts: command line arguments
+        in_channels (int): :math:`C_{in}` from an expected input of size :math:`(N, C_{in}, H, W)`
+        transformer_dim (int): Input dimension to the transformer unit
+        ffn_dim (int): Dimension of the FFN block
+        n_transformer_blocks (int): Number of transformer blocks. Default: 2
+        head_dim (int): Head dimension in the multi-head attention. Default: 32
+        attn_dropout (float): Dropout in multi-head attention. Default: 0.0
+        dropout (float): Dropout rate. Default: 0.0
+        ffn_dropout (float): Dropout between FFN layers in transformer. Default: 0.0
+        patch_h (int): Patch height for unfolding operation. Default: 8
+        patch_w (int): Patch width for unfolding operation. Default: 8
+        transformer_norm_layer (Optional[str]): Normalization layer in the transformer block. Default: layer_norm
+        conv_ksize (int): Kernel size to learn local representations in MobileViT block. Default: 3
+        no_fusion (Optional[bool]): Do not combine the input and output feature maps. Default: False
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        transformer_dim: int,
+        ffn_dim: int,
+        n_transformer_blocks: int = 2,
+        head_dim: int = 32,
+        attn_dropout: float = 0.0,
+        dropout: float = 0.0,
+        ffn_dropout: float = 0.0,
+        patch_h: int = 8,
+        patch_w: int = 8,
+        conv_ksize: Optional[int] = 3,
+        *args,
+        **kwargs
+    ) -> None:
+        super().__init__()
+
+        conv_3x3_in = ConvLayer(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=conv_ksize,
+            stride=1
+        )
+        conv_1x1_in = ConvLayer(
+            in_channels=in_channels,
+            out_channels=transformer_dim,
+            kernel_size=1,
+            stride=1
+        )
+
+        conv_1x1_out = ConvLayer(
+            in_channels=transformer_dim,
+            out_channels=in_channels,
+            kernel_size=1,
+            stride=1
+        )
+        conv_3x3_out = ConvLayer(
+            in_channels=2 * in_channels,
+            out_channels=out_channels,
+            kernel_size=conv_ksize,
+            stride=1,
+            pad_mode="pad",
+            padding=1
+        )
+
+        local_rep = []
+        local_rep.append(conv_3x3_in)
+        local_rep.append(conv_1x1_in)
+        self.local_rep = nn.SequentialCell(local_rep)
+
+        assert transformer_dim % head_dim == 0
+        num_heads = transformer_dim // head_dim
+
+        self.global_rep = [
+            TransformerEncoder(
+                embed_dim=transformer_dim,
+                ffn_latent_dim=ffn_dim,
+                num_heads=num_heads,
+                attn_dropout=attn_dropout,
+                dropout=dropout,
+                ffn_dropout=ffn_dropout
+            )
+            for _ in range(n_transformer_blocks)
+        ]
+        self.global_rep.append(nn.LayerNorm((transformer_dim,)))
+        self.global_rep = nn.SequentialCell(self.global_rep)
+
+        self.conv_proj = conv_1x1_out
+        self.fusion = conv_3x3_out
+
+        self.patch_h = patch_h
+        self.patch_w = patch_w
+        self.patch_area = self.patch_w * self.patch_h
+
+        self.cnn_in_dim = in_channels
+        self.cnn_out_dim = transformer_dim
+        self.n_heads = num_heads
+        self.ffn_dim = ffn_dim
+        self.dropout = dropout
+        self.attn_dropout = attn_dropout
+        self.ffn_dropout = ffn_dropout
+        self.n_blocks = n_transformer_blocks
+        self.conv_ksize = conv_ksize
+
+    def unfolding(self, x: Tensor) -> Tuple[Tensor, Dict]:
+        patch_w, patch_h = self.patch_w, self.patch_h
+        patch_area = patch_w * patch_h
+        batch_size, in_channels, orig_h, orig_w = x.shape
+
+        #TODO: math.ceil替换
+        new_h = int(math.ceil(orig_h / self.patch_h) * self.patch_h)
+        new_w = int(math.ceil(orig_w / self.patch_w) * self.patch_w)
+
+        interpolate = False
+        if new_w != orig_w or new_h != orig_h:
+            # Note: Padding can be done, but then it needs to be handled in attention function.
+            x = ops.interpolate(x, size=(new_h, new_w), coordinate_transformation_mode="align_corners", mode="bilinear")
+            interpolate = True
+
+        # number of patches along width and height
+        num_patch_w = new_w // patch_w  # n_w
+        num_patch_h = new_h // patch_h  # n_h
+        num_patches = num_patch_h * num_patch_w  # N
+
+        # [B, C, H, W] -> [B * C * n_h, p_h, n_w, p_w]
+        x = ops.reshape(x, (batch_size * in_channels * num_patch_h, patch_h, num_patch_w, patch_w))
+        # [B * C * n_h, p_h, n_w, p_w] -> [B * C * n_h, n_w, p_h, p_w]
+        x = ops.transpose(x, (0, 2, 1, 3))
+        # [B * C * n_h, n_w, p_h, p_w] -> [B, C, N, P] where P = p_h * p_w and N = n_h * n_w
+        x = ops.reshape(x, (batch_size, in_channels, num_patches, patch_area))
+        # [B, C, N, P] -> [B, P, N, C]
+        x = ops.transpose(x, (0, 3, 2, 1))
+        # [B, P, N, C] -> [BP, N, C]
+        x = ops.reshape(x, (batch_size * patch_area, num_patches, -1))
+
+        info_dict = {
+            "orig_size": (orig_h, orig_w),
+            "batch_size": batch_size,
+            "interpolate": interpolate,
+            "total_patches": num_patches,
+            "num_patches_w": num_patch_w,
+            "num_patches_h": num_patch_h,
+        }
+
+        return x, info_dict
+
+    def folding(self, x: Tensor, info_dict: Dict) -> Tensor:
+        n_dim = ops.rank(x)
+        assert n_dim == 3, "Tensor should be of shape BPxNxC. Got: {}".format(
+            x.shape
+        )
+        # [BP, N, C] --> [B, P, N, C]
+        x = x.view(
+            info_dict["batch_size"], self.patch_area, info_dict["total_patches"], -1
+        )
+
+        batch_size, pixels, num_patches, channels = x.shape
+        num_patch_h = info_dict["num_patches_h"]
+        num_patch_w = info_dict["num_patches_w"]
+
+        # [B, P, N, C] -> [B, C, N, P]
+        x = ops.transpose(x, (0, 3, 2, 1))
+        # [B, C, N, P] -> [B*C*n_h, n_w, p_h, p_w]
+        x = ops.reshape(x, (batch_size * channels * num_patch_h, num_patch_w, self.patch_h, self.patch_w))
+        # [B*C*n_h, n_w, p_h, p_w] -> [B*C*n_h, p_h, n_w, p_w]
+        x = ops.transpose(x, (0, 2, 1, 3))
+        # [B*C*n_h, p_h, n_w, p_w] -> [B, C, H, W]
+        x = ops.reshape(x, (batch_size, channels, num_patch_h * self.patch_h, num_patch_w * self.patch_w))
+        if info_dict["interpolate"]:
+            x = ops.interpolate(
+                x,
+                size=info_dict["orig_size"],
+                coordinate_transformation_mode="align_corners",
+                mode="bilinear",
+            )
+        return x
+
+    def construct(self, x: Tensor) -> Tensor:
+        # print("mobilevitblock", x.shape)
+        res = x
+
+        fm = self.local_rep(x)
+        # print("fm", fm.shape)
+
+        # convert feature map to patches
+        patches, info_dict = self.unfolding(fm)
+
+        # learn global representations
+        for transformer_layer in self.global_rep:
+            patches = transformer_layer(patches)
+
+        # [B x Patch x Patches x C] -> [B x C x Patches x Patch]
+        fm = self.folding(x=patches, info_dict=info_dict)
+
+        fm = self.conv_proj(fm)
+
+        fm = self.fusion(ops.concat((res, fm), 1))
+        return fm
+
+
 class MobileViT(nn.Cell):
     """
-    主模型
+    This class implements the `MobileViT architecture <https://arxiv.org/abs/2110.02178?context=cs.LG>`_
     """
-    
-    """
-    MobileViT model class, based on
-    `"MobileViT：Light-weight, General-purpose, and Mobile-friendly Vision Transformer"
-    <https://arxiv.org/abs/2110.02178>`_
-    
-    Args:
+    def __init__(self, model_cfg: Dict, num_classes: int = 1000):
+        super().__init__()
 
-    """
-    
-    def __init__(self,
-                 img_size, 
-                 features_list, 
-                 d_list, 
-                 transformer_depth, 
-                 expansion, 
-                 num_classes = 100):
-        super(MobileViT, self).__init__()
+        image_channels = 3
+        out_channels = 16
 
-        self.stem = nn.SequentialCell(
-            nn.Conv2d(in_channels = 3, out_channels = features_list[0], kernel_size = 3, stride = 2, pad_mode = "pad", padding = 1),
-            InvertedResidual(in_channels = features_list[0], out_channels = features_list[1], stride = 1, expand_ratio = expansion),
+        self.conv_1 = ConvLayer(
+            in_channels=image_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            stride=2
         )
 
-        self.stage1 = nn.SequentialCell(
-            InvertedResidual(in_channels = features_list[1], out_channels = features_list[2], stride = 2, expand_ratio = expansion),
-            InvertedResidual(in_channels = features_list[2], out_channels = features_list[2], stride = 1, expand_ratio = expansion),
-            InvertedResidual(in_channels = features_list[2], out_channels = features_list[3], stride = 1, expand_ratio = expansion)
+        self.layer_1, out_channels = self._make_layer(input_channel=out_channels, cfg=model_cfg["layer1"])
+        self.layer_2, out_channels = self._make_layer(input_channel=out_channels, cfg=model_cfg["layer2"])
+        self.layer_3, out_channels = self._make_layer(input_channel=out_channels, cfg=model_cfg["layer3"])
+        self.layer_4, out_channels = self._make_layer(input_channel=out_channels, cfg=model_cfg["layer4"])
+        self.layer_5, out_channels = self._make_layer(input_channel=out_channels, cfg=model_cfg["layer5"])
+
+        exp_channels = min(model_cfg["last_layer_exp_factor"] * out_channels, 960)
+        self.conv_1x1_exp = ConvLayer(
+            in_channels=out_channels,
+            out_channels=exp_channels,
+            kernel_size=1
         )
 
-        self.stage2 = nn.SequentialCell(
-            InvertedResidual(in_channels = features_list[3], out_channels = features_list[4], stride = 2, expand_ratio = expansion),
-            MobileVitBlock(in_channels = features_list[4], out_channels = features_list[5], d_model = d_list[0],
-                           layers = transformer_depth[0], mlp_dim = d_list[0] * 2)
-        )
+        classifier = []
+        classifier.append(nn.AdaptiveAvgPool2d(1))
+        classifier.append(nn.Flatten())
+        if 0.0 < model_cfg["cls_dropout"] < 1.0:
+            classifier.append(nn.Dropout(keep_prob=1 - model_cfg["cls_dropout"]))
+        classifier.append(nn.Dense(in_channels=exp_channels, out_channels=num_classes))
+        self.classifier = nn.SequentialCell(classifier)
 
-        self.stage3 = nn.SequentialCell(
-            InvertedResidual(in_channels = features_list[5], out_channels = features_list[6], stride = 2, expand_ratio = expansion),
-            MobileVitBlock(in_channels = features_list[6], out_channels = features_list[7], d_model = d_list[1],
-                           layers = transformer_depth[1], mlp_dim = d_list[1] * 4)
-        )
+        # weight init
+        # self.apply(self.init_parameters)
 
-        self.stage4 = nn.SequentialCell(
-            InvertedResidual(in_channels = features_list[7], out_channels = features_list[8], stride = 2, expand_ratio = expansion),
-            MobileVitBlock(in_channels = features_list[8], out_channels = features_list[9], d_model = d_list[2],
-                           layers = transformer_depth[2], mlp_dim = d_list[2] * 4),
-            nn.Conv2d(in_channels = features_list[9], out_channels = features_list[10], kernel_size = 1, stride = 1, padding = 0)
-        )
+    def _make_layer(self, input_channel, cfg: Dict) -> Tuple[nn.SequentialCell, int]:
+        # # print("makelayer")
+        block_type = cfg.get("block_type", "mobilevit")
+        if block_type.lower() == "mobilevit":
+            return self._make_mit_layer(input_channel=input_channel, cfg=cfg)
+        else:
+            return self._make_mobilenet_layer(input_channel=input_channel, cfg=cfg)
 
-        self.avgpool = nn.AvgPool2d(kernel_size = img_size // 32)
-        self.fc = nn.Dense(features_list[10], num_classes)
-        self._initialize_weights()
+    @staticmethod
+    def _make_mobilenet_layer(input_channel: int, cfg: Dict) -> Tuple[nn.SequentialCell, int]:
+        # # print("mobilenet_layer")
+        output_channels = cfg.get("out_channels")
+        num_blocks = cfg.get("num_blocks", 2)
+        expand_ratio = cfg.get("expand_ratio", 4)
+        block = []
 
+        for i in range(num_blocks):
+            stride = cfg.get("stride", 1) if i == 0 else 1
+
+            layer = InvertedResidual(
+                in_channels=input_channel,
+                out_channels=output_channels,
+                stride=stride,
+                expand_ratio=expand_ratio
+            )
+            block.append(layer)
+            input_channel = output_channels
+
+        return nn.SequentialCell(block), input_channel
+
+    @staticmethod
+    def _make_mit_layer(input_channel: int, cfg: Dict) -> [nn.SequentialCell, int]:
+        # print("mit_layer")
+        stride = cfg.get("stride", 1)
+        block = []
+
+        if stride == 2:
+            layer = InvertedResidual(
+                in_channels=input_channel,
+                out_channels=cfg.get("out_channels"),
+                stride=stride,
+                expand_ratio=cfg.get("mv_expand_ratio", 4)
+            )
+
+            block.append(layer)
+            input_channel = cfg.get("out_channels")
+
+        transformer_dim = cfg["transformer_channels"]
+        ffn_dim = cfg.get("ffn_dim")
+        num_heads = cfg.get("num_heads", 4)
+        head_dim = transformer_dim // num_heads
+
+        if transformer_dim % head_dim != 0:
+            raise ValueError("Transformer input dimension should be divisible by head dimension. "
+                             "Got {} and {}.".format(transformer_dim, head_dim))
+
+        block.append(MobileViTBlock(
+            in_channels=input_channel,
+            out_channels=cfg.get("out_channels"),
+            transformer_dim=transformer_dim,
+            ffn_dim=ffn_dim,
+            n_transformer_blocks=cfg.get("transformer_blocks", 1),
+            patch_h=cfg.get("patch_h", 2),
+            patch_w=cfg.get("patch_w", 2),
+            dropout=cfg.get("dropout", 0.1),
+            ffn_dropout=cfg.get("ffn_dropout", 0.0),
+            attn_dropout=cfg.get("attn_dropout", 0.1),
+            head_dim=head_dim,
+            conv_ksize=3
+        ))
+
+        return nn.SequentialCell(block), input_channel
+
+    @staticmethod
     def _initialize_weights(self) -> None:
         """Initialize weights for cells."""
         for _, cell in self.cells_and_names():
@@ -253,86 +583,44 @@ class MobileViT(nn.Cell):
                 cell.gamma.set_data(init.initializer(init.Constant(1), cell.gamma.shape))
                 cell.beta.set_data(init.initializer(init.Constant(0), cell.beta.shape))
 
-    def construct(self, x):
-        # Stem
-        x = self.stem(x)
-        # Body
-        x = self.stage1(x)
-        x = self.stage2(x)
-        x = self.stage3(x)
-        x = self.stage4(x)
-        # Head
-        x = self.avgpool(x)
-        
-        x = x.view((x.shape[0], -1))
-        x = self.fc(x)
+    def construct(self, x: Tensor) -> Tensor:
+        # print(x.shape)
+        x = self.conv_1(x)
+        # print("conv1", x.shape)
+        x = self.layer_1(x)
+        # print("layer1", x.shape)
+        x = self.layer_2(x)
+        # print("layer2", x.shape)
+        x = self.layer_3(x)
+        x = self.layer_4(x)
+        x = self.layer_5(x)
+        x = self.conv_1x1_exp(x)
+        x = self.classifier(x)
         return x
- 
-model_cfg = {
-    "xxs":{
-        "features": [16, 16, 24, 24, 48, 48, 64, 64, 80, 80, 320],
-        "d": [64, 80, 96],
-        "expansion_ratio": 2,
-        "layers": [2, 4, 3]
-    },
-    "xs":{
-        "features": [16, 32, 48, 48, 64, 64, 80, 80, 96, 96, 384],
-        "d": [96, 120, 144],
-        "expansion_ratio": 4,
-        "layers": [2, 4, 3]
-    },
-    "s":{
-        "features": [16, 32, 64, 64, 96, 96, 128, 128, 160, 160, 640],
-        "d": [144, 192, 240],
-        "expansion_ratio": 4,
-        "layers": [2, 4, 3]
-    },
-} 
-        
-@register_model
-def mobilevit_xxs(pretrained: bool = False, num_classes: int = 100, in_channels=3, **kwargs) -> MobileViT:
-    default_cfg = default_cfgs['mobilevit_xxs']
-    cfg_xxs = model_cfg["xxs"]
-    model = MobileViT(img_size=256, 
-                      features_list=cfg_xxs["features"], 
-                      d_list=cfg_xxs["d"], 
-                      transformer_depth=cfg_xxs["layers"], 
-                      expansion=cfg_xxs["expansion_ratio"],
-                      num_classes=num_classes)
-    
-    # if pretrained:
-    #     load_pretrained(model, default_cfg, num_classes=num_classes, in_channels=in_channels)
 
-    return model
 
 @register_model
-def mobilevit_xs(pretrained: bool = False, num_classes: int = 100, in_channels=3, **kwargs) -> MobileViT:
-    default_cfg = default_cfgs['mobilevit_xs']
-    cfg_xs = model_cfg["xs"]
-    model = MobileViT(img_size=256, 
-                      features_list=cfg_xs["features"], 
-                      d_list=cfg_xs["d"], 
-                      transformer_depth=cfg_xs["layers"], 
-                      expansion=cfg_xs["expansion_ratio"],
-                      num_classes=num_classes)
-    
-    # if pretrained:
-    #     load_pretrained(model, default_cfg, num_classes=num_classes, in_channels=in_channels)
+def mobile_vit_xx_small(pretrained: bool = False, num_classes: int = 1000, in_channels=3, **kwargs) -> MobileViT:
+    # pretrain weight link
+    # https://docs-assets.developer.apple.com/ml-research/models/cvnets/classification/mobilevit_xxs.pt
+    config = get_config("xx_small")
+    m = MobileViT(config, num_classes=num_classes)
+    return m
 
-    return model
 
 @register_model
-def mobilevit_s(pretrained: bool = False, num_classes: int = 100, in_channels=3, **kwargs) -> MobileViT:
-    default_cfg = default_cfgs['mobilevit_s']
-    cfg_s = model_cfg["s"]
-    model = MobileViT(img_size=256, 
-                      features_list=cfg_s["features"], 
-                      d_list=cfg_s["d"], 
-                      transformer_depth=cfg_s["layers"], 
-                      expansion=cfg_s["expansion_ratio"],
-                      num_classes=num_classes)
-    
-    # if pretrained:
-    #     load_pretrained(model, default_cfg, num_classes=num_classes, in_channels=in_channels)
+def mobile_vit_x_small(pretrained: bool = False, num_classes: int = 1000, in_channels=3, **kwargs) -> MobileViT:
+    # pretrain weight link
+    # https://docs-assets.developer.apple.com/ml-research/models/cvnets/classification/mobilevit_xs.pt
+    config = get_config("x_small")
+    m = MobileViT(config, num_classes=num_classes)
+    return m
 
-    return model
+
+@register_model
+def mobile_vit_small(pretrained: bool = False, num_classes: int = 1000, in_channels=3, **kwargs) -> MobileViT:
+    # pretrain weight link
+    # https://docs-assets.developer.apple.com/ml-research/models/cvnets/classification/mobilevit_s.pt
+    config = get_config("small")
+    m = MobileViT(config, num_classes=num_classes)
+    return m
